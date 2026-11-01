@@ -9,11 +9,6 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 
-Gio._promisify(Gio.File.prototype, 'append_to_async');
-Gio._promisify(Gio.File.prototype, 'load_contents_async');
-Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async');
-Gio._promisify(Gio.OutputStream.prototype, 'close_async');
-
 const DEVICE = '/proc/acpi/nuc_led';
 
 // WMI codes for NUC6CAY / NUC7i[x]BN (Intel article 000023426)
@@ -56,60 +51,63 @@ const ERRORS = {
     0xef: 'unexpected error',
 };
 
-// Write 5 bytes to the driver and return the 4 result bytes.
-async function wmiCallUnqueued(bytes, cancellable) {
-    const line = `${bytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}\n`;
-    const file = Gio.File.new_for_path(DEVICE);
-    const out = await file.append_to_async(
-        Gio.FileCreateFlags.NONE, GLib.PRIORITY_DEFAULT, cancellable);
-    await out.write_bytes_async(
-        new GLib.Bytes(new TextEncoder().encode(line)), GLib.PRIORITY_DEFAULT, cancellable);
-    await out.close_async(GLib.PRIORITY_DEFAULT, cancellable);
-    const [contents] = await file.load_contents_async(cancellable);
-    return new TextDecoder().decode(contents)
-        .replace(/\0/g, '').trim().split(/\s+/).map(h => parseInt(h, 16));
-}
-
-// The driver keeps one shared result buffer, so calls must not overlap.
-let queue = Promise.resolve();
-function wmiCall(bytes, cancellable = null) {
-    const result = queue.then(() => wmiCallUnqueued(bytes, cancellable));
-    queue = result.catch(() => {});
-    return result;
+function errorText(code) {
+    return ERRORS[code] ?? `error 0x${code.toString(16)}`;
 }
 
 function isCancelled(e) {
     return e instanceof GLib.Error && e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
 }
 
-function checkResult(result, what) {
-    const bad = result.slice(0, 3).find(b => b !== 0x00);
-    if (bad !== undefined)
-        throw new Error(`${what}: ${ERRORS[bad] ?? `error 0x${bad.toString(16)}`}`);
+// Run a Gio *_async method and resolve with its *_finish result
+function gioAsync(object, method, ...args) {
+    return new Promise((resolve, reject) => {
+        object[`${method}_async`](...args, (obj, res) => {
+            try {
+                resolve(obj[`${method}_finish`](res));
+            } catch (e) {
+                reject(e);
+            }
+        });
+    });
+}
+
+// Write 5 bytes to the driver and return the 4 result bytes
+async function wmiCall(bytes, cancellable) {
+    const line = `${bytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}\n`;
+    const file = Gio.File.new_for_path(DEVICE);
+
+    const stream = await gioAsync(file, 'append_to',
+        Gio.FileCreateFlags.NONE, GLib.PRIORITY_DEFAULT, cancellable);
+    await gioAsync(stream, 'write_bytes',
+        new GLib.Bytes(new TextEncoder().encode(line)), GLib.PRIORITY_DEFAULT, cancellable);
+    await gioAsync(stream, 'close', GLib.PRIORITY_DEFAULT, cancellable);
+
+    const [, contents] = await gioAsync(file, 'load_contents', cancellable);
+    cancellable.set_error_if_cancelled();
+    return new TextDecoder().decode(contents)
+        .replace(/\0/g, '').trim().split(/\s+/).map(h => parseInt(h, 16));
 }
 
 class LedSection {
-    constructor(indicator, menu, led, title, colors) {
+    constructor(indicator, led, title, colors) {
         this._indicator = indicator;
         this._led = led;
         this._colors = colors;
+        this._lastColor = colors[0][0];
         this.state = {brightness: 100, effect: 0x04, color: 0x00};
-        this._sliderTimeout = 0;
+        this._sliderTimeoutId = 0;
         this._updatingSlider = false;
 
+        const menu = indicator.menu;
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem(title));
 
-        // On/off switch
         this._switch = new PopupMenu.PopupSwitchMenuItem('On', false);
         this._switch.connect('toggled', (_item, on) => {
-            if (on)
-                this.apply({color: this.state.color || this._lastColor || colors[0][0]});
-            else
-                this.apply({color: 0x00});
+            this.apply({color: on ? this._lastColor : 0x00});
         });
         menu.addMenuItem(this._switch);
 
-        // Brightness slider
         const sliderItem = new PopupMenu.PopupBaseMenuItem({activate: false});
         sliderItem.add_child(new St.Icon({
             icon_name: 'display-brightness-symbolic',
@@ -121,7 +119,6 @@ class LedSection {
         sliderItem.add_child(this._slider);
         menu.addMenuItem(sliderItem);
 
-        // Color and effect pickers
         this._colorMenu = new PopupMenu.PopupSubMenuMenuItem('Color');
         this._colorItems = colors.map(([code, label, css]) => {
             const item = new PopupMenu.PopupMenuItem(label);
@@ -147,9 +144,9 @@ class LedSection {
     }
 
     async refresh() {
-        const r = await wmiCall([METHOD_GET, this._led, 0, 0, 0], this._indicator.cancellable);
+        const r = await this._indicator.call([METHOD_GET, this._led, 0, 0, 0]);
         if (r[0] !== 0x00)
-            throw new Error(ERRORS[r[0]] ?? `error 0x${r[0].toString(16)}`);
+            throw new Error(errorText(r[0]));
         this.state = {brightness: r[1], effect: r[2], color: r[3]};
         this._sync();
     }
@@ -157,9 +154,11 @@ class LedSection {
     async apply(changes) {
         const s = {...this.state, ...changes};
         try {
-            const r = await wmiCall([METHOD_SET, this._led, s.brightness, s.effect, s.color],
-                this._indicator.cancellable);
-            checkResult(r, 'Setting LED failed');
+            const r = await this._indicator.call(
+                [METHOD_SET, this._led, s.brightness, s.effect, s.color]);
+            const bad = r.slice(0, 3).find(b => b !== 0x00);
+            if (bad !== undefined)
+                throw new Error(`Setting LED failed: ${errorText(bad)}`);
             this.state = s;
         } catch (e) {
             if (isCancelled(e))
@@ -174,10 +173,6 @@ class LedSection {
     }
 
     _sync() {
-        // The menu may have been destroyed while a call was in flight
-        if (this._indicator.cancellable.is_cancelled())
-            return;
-
         const {brightness, effect, color} = this.state;
         if (color)
             this._lastColor = color;
@@ -193,7 +188,7 @@ class LedSection {
         for (const [code, item] of this._colorItems)
             item.setOrnament(code === color ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE);
 
-        const effectLabel = EFFECTS.find(([c]) => c === effect)?.[1] ?? '?';
+        const effectLabel = EFFECTS.find(([c]) => c === effect)?.[1] ?? 'Unknown';
         this._effectMenu.label.text = `Effect: ${effectLabel}`;
         for (const [code, item] of this._effectItems)
             item.setOrnament(code === effect ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE);
@@ -201,23 +196,23 @@ class LedSection {
         this._indicator.updateIcon();
     }
 
-    // Wait until the slider stops moving briefly before sending the change
+    // Send the brightness once the slider has stopped moving for 150 ms
     _onSliderChanged() {
         if (this._updatingSlider)
             return;
-        if (this._sliderTimeout)
-            GLib.source_remove(this._sliderTimeout);
-        this._sliderTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-            this._sliderTimeout = 0;
+        if (this._sliderTimeoutId)
+            GLib.source_remove(this._sliderTimeoutId);
+        this._sliderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+            this._sliderTimeoutId = 0;
             this.apply({brightness: Math.round(this._slider.value * 100)});
             return GLib.SOURCE_REMOVE;
         });
     }
 
     destroy() {
-        if (this._sliderTimeout)
-            GLib.source_remove(this._sliderTimeout);
-        this._sliderTimeout = 0;
+        if (this._sliderTimeoutId)
+            GLib.source_remove(this._sliderTimeoutId);
+        this._sliderTimeoutId = 0;
     }
 }
 
@@ -226,6 +221,10 @@ class NucLedIndicator extends PanelMenu.Button {
     _init(extensionPath) {
         super._init(0.0, 'NUC LED Control');
 
+        this._cancellable = new Gio.Cancellable();
+        // The driver has one shared result buffer, so calls must not overlap
+        this._queue = Promise.resolve();
+
         this._icon = new St.Icon({
             gicon: Gio.FileIcon.new(
                 Gio.File.new_for_path(`${extensionPath}/icons/nuc-ring-symbolic.svg`)),
@@ -233,15 +232,14 @@ class NucLedIndicator extends PanelMenu.Button {
         });
         this.add_child(this._icon);
 
-        this.cancellable = new Gio.Cancellable();
-
-        this._errorItem = new PopupMenu.PopupMenuItem('', {reactive: false});
+        this._errorItem = new PopupMenu.PopupImageMenuItem('', 'dialog-warning-symbolic',
+            {reactive: false});
         this._errorItem.label.clutter_text.line_wrap = true;
         this._errorItem.visible = false;
         this.menu.addMenuItem(this._errorItem);
 
-        this._ring = new LedSection(this, this.menu, LED_RING, 'Ring LED', RING_COLORS);
-        this._power = new LedSection(this, this.menu, LED_POWER, 'Power Button LED', POWER_COLORS);
+        this._ring = new LedSection(this, LED_RING, 'Ring LED', RING_COLORS);
+        this._power = new LedSection(this, LED_POWER, 'Power Button LED', POWER_COLORS);
 
         this.menu.connect('open-state-changed', (_menu, open) => {
             if (open)
@@ -251,13 +249,19 @@ class NucLedIndicator extends PanelMenu.Button {
         this.refresh();
     }
 
+    call(bytes) {
+        const result = this._queue.then(() => wmiCall(bytes, this._cancellable));
+        this._queue = result.catch(() => {});
+        return result;
+    }
+
     async refresh() {
         this._errorItem.visible = false;
         try {
             await this._ring.refresh();
             await this._power.refresh();
         } catch (e) {
-            if (!isCancelled(e) && !this.cancellable.is_cancelled())
+            if (!isCancelled(e))
                 this.showError(e);
         }
     }
@@ -268,20 +272,21 @@ class NucLedIndicator extends PanelMenu.Button {
             msg = 'nuc_led kernel module is not loaded';
         else if (e instanceof GLib.Error && e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.PERMISSION_DENIED))
             msg = `No permission to write ${DEVICE}`;
-        this._errorItem.label.text = `⚠ ${msg}`;
+        this._errorItem.label.text = msg;
         this._errorItem.visible = true;
         console.warn(`NUC LED: ${msg}`);
     }
 
     updateIcon() {
-        const css = this._ring?.colorCss();
+        const css = this._ring.colorCss();
         this._icon.style = css ? `color: ${css};` : null;
     }
 
     destroy() {
-        this.cancellable.cancel();
-        this._ring?.destroy();
-        this._power?.destroy();
+        // Stops in-flight calls; their handlers return early on CANCELLED
+        this._cancellable.cancel();
+        this._ring.destroy();
+        this._power.destroy();
         super.destroy();
     }
 });
@@ -293,7 +298,7 @@ export default class NucLedExtension extends Extension {
     }
 
     disable() {
-        this._indicator?.destroy();
+        this._indicator.destroy();
         this._indicator = null;
     }
 }
