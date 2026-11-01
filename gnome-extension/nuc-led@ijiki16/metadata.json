@@ -1,5 +1,5 @@
 {
-  "uuid": "nuc-led@applecross",
+  "uuid": "nuc-led@ijiki16",
   "name": "NUC LED Control",
   "description": "Control the ring and power button LEDs on Intel NUC7 / NUC6 via the nuc_led kernel module.",
   "shell-version": ["48", "49", "50"],

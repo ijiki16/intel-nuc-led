@@ -46,8 +46,8 @@ Tested on a NUC7i5BNB (BIOS BN0063) with Fedora 44 (kernel 7.2) and GNOME 50.
 3. Install the GNOME Shell extension (GNOME 48–50), then log out and back in:
 
    ```
-   ln -s "$PWD/gnome-extension/nuc-led@applecross" ~/.local/share/gnome-shell/extensions/
-   gnome-extensions enable nuc-led@applecross
+   ln -s "$PWD/gnome-extension/nuc-led@ijiki16" ~/.local/share/gnome-shell/extensions/
+   gnome-extensions enable nuc-led@ijiki16
    ```
 
    A ring icon appears in the top bar, tinted with the ring LED's color. Its
@@ -73,8 +73,8 @@ the new build.
 ### Uninstall
 
 ```
-gnome-extensions disable nuc-led@applecross
-rm ~/.local/share/gnome-shell/extensions/nuc-led@applecross
+gnome-extensions disable nuc-led@ijiki16
+rm ~/.local/share/gnome-shell/extensions/nuc-led@ijiki16
 sudo rmmod nuc_led
 sudo dkms remove -m intel-nuc-led -v 1.0 --all
 sudo rm -rf /usr/src/intel-nuc-led-1.0 /etc/modules-load.d/nuc_led.conf /etc/modprobe.d/nuc_led.conf
