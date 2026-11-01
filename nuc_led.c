@@ -100,6 +100,7 @@ static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
     }
 
     if (copy_from_user(kernelBuff, buff, len)) {
+        vfree(kernelBuff);
         return -EFAULT;
     }
 
@@ -146,6 +147,7 @@ static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
 
         } else {
             pr_warn("NUC LED invalid character: %c\n", c );
+            vfree(kernelBuff);
             return -EIO;
         }
     }
@@ -154,6 +156,7 @@ static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
     }
     if( inputBufferI != 5 ) {
         pr_warn("NUC LED received wrong number of bytes (5 needed): %d\n", inputBufferI );
+        vfree(kernelBuff);
         return -EIO;
     }
 
@@ -182,6 +185,12 @@ static ssize_t acpi_proc_write(struct file *filp, const char __user *buff,
     // unpack wmi output
 
     acpiObjectP = (union acpi_object *)acpiOutput.pointer;
+
+    if (!acpiObjectP || acpiObjectP->type != ACPI_TYPE_BUFFER) {
+        pr_warn("NUC LED WMI returned no buffer\n");
+        kfree(acpiOutput.pointer);
+        return -EIO;
+    }
 
     // pr_info( "NUC LED WMI response has length: %d\n", acpiObjectP->buffer.length );
 

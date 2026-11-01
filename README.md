@@ -20,6 +20,38 @@ can run it on other distros as well.
 Pull requests appreciated. And reports if you could (or could not) get it
 running on other NUCs with software-controllable LEDs, and other distros.
 
+## Fedora quick install + GNOME extension (this fork)
+
+Tested on a NUC7i5BNB with Fedora 44 (kernel 7.2) and GNOME 50.
+
+1. In the BIOS (F2 → Advanced → Power → Secondary Power Settings), set
+   **Ring LED** and **Button LED** to **SW control**. Without this, every
+   call returns `e2` (undefined device).
+2. Build, install with DKMS and load at every boot (your user becomes owner of
+   `/proc/acpi/nuc_led`, so no root is needed afterwards):
+
+   ```
+   sudo ./install-fedora.sh
+   ```
+
+3. Install the GNOME Shell extension (GNOME 48–50), then log out and back in:
+
+   ```
+   ln -s "$PWD/gnome-extension/nuc-led@applecross" ~/.local/share/gnome-shell/extensions/
+   gnome-extensions enable nuc-led@applecross
+   ```
+
+   A ring icon appears in the top bar, tinted with the ring LED's color. Its
+   menu has an on/off switch, a brightness slider, and color and effect
+   pickers for the ring LED and the power button LED.
+
+Quick command-line test (NUC6CAY / NUC7i[x]BN):
+
+```
+echo "02 02 64 04 06" > /proc/acpi/nuc_led   # ring: 100%, solid, green
+cat /proc/acpi/nuc_led                        # 00 00 00 00 = no error
+```
+
 ## Requirements
 
 Requirements:
