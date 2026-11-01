@@ -9,6 +9,11 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 
+Gio._promisify(Gio.File.prototype, 'append_to_async');
+Gio._promisify(Gio.File.prototype, 'load_contents_async');
+Gio._promisify(Gio.OutputStream.prototype, 'write_bytes_async');
+Gio._promisify(Gio.OutputStream.prototype, 'close_async');
+
 const DEVICE = '/proc/acpi/nuc_led';
 
 // WMI codes for NUC6CAY / NUC7i[x]BN (Intel article 000023426)
@@ -52,15 +57,29 @@ const ERRORS = {
 };
 
 // Write 5 bytes to the driver and return the 4 result bytes.
-function wmiCall(bytes) {
+async function wmiCallUnqueued(bytes, cancellable) {
     const line = `${bytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}\n`;
     const file = Gio.File.new_for_path(DEVICE);
-    const out = file.append_to(Gio.FileCreateFlags.NONE, null);
-    out.write_all(new TextEncoder().encode(line), null);
-    out.close(null);
-    const [, contents] = file.load_contents(null);
+    const out = await file.append_to_async(
+        Gio.FileCreateFlags.NONE, GLib.PRIORITY_DEFAULT, cancellable);
+    await out.write_bytes_async(
+        new GLib.Bytes(new TextEncoder().encode(line)), GLib.PRIORITY_DEFAULT, cancellable);
+    await out.close_async(GLib.PRIORITY_DEFAULT, cancellable);
+    const [contents] = await file.load_contents_async(cancellable);
     return new TextDecoder().decode(contents)
         .replace(/\0/g, '').trim().split(/\s+/).map(h => parseInt(h, 16));
+}
+
+// The driver keeps one shared result buffer, so calls must not overlap.
+let queue = Promise.resolve();
+function wmiCall(bytes, cancellable = null) {
+    const result = queue.then(() => wmiCallUnqueued(bytes, cancellable));
+    queue = result.catch(() => {});
+    return result;
+}
+
+function isCancelled(e) {
+    return e instanceof GLib.Error && e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
 }
 
 function checkResult(result, what) {
@@ -127,21 +146,24 @@ class LedSection {
         menu.addMenuItem(this._effectMenu);
     }
 
-    refresh() {
-        const r = wmiCall([METHOD_GET, this._led, 0, 0, 0]);
+    async refresh() {
+        const r = await wmiCall([METHOD_GET, this._led, 0, 0, 0], this._indicator.cancellable);
         if (r[0] !== 0x00)
             throw new Error(ERRORS[r[0]] ?? `error 0x${r[0].toString(16)}`);
         this.state = {brightness: r[1], effect: r[2], color: r[3]};
         this._sync();
     }
 
-    apply(changes) {
+    async apply(changes) {
+        const s = {...this.state, ...changes};
         try {
-            const s = {...this.state, ...changes};
-            const r = wmiCall([METHOD_SET, this._led, s.brightness, s.effect, s.color]);
+            const r = await wmiCall([METHOD_SET, this._led, s.brightness, s.effect, s.color],
+                this._indicator.cancellable);
             checkResult(r, 'Setting LED failed');
             this.state = s;
         } catch (e) {
+            if (isCancelled(e))
+                return;
             this._indicator.showError(e);
         }
         this._sync();
@@ -152,6 +174,10 @@ class LedSection {
     }
 
     _sync() {
+        // The menu may have been destroyed while a call was in flight
+        if (this._indicator.cancellable.is_cancelled())
+            return;
+
         const {brightness, effect, color} = this.state;
         if (color)
             this._lastColor = color;
@@ -207,6 +233,8 @@ class NucLedIndicator extends PanelMenu.Button {
         });
         this.add_child(this._icon);
 
+        this.cancellable = new Gio.Cancellable();
+
         this._errorItem = new PopupMenu.PopupMenuItem('', {reactive: false});
         this._errorItem.label.clutter_text.line_wrap = true;
         this._errorItem.visible = false;
@@ -223,13 +251,14 @@ class NucLedIndicator extends PanelMenu.Button {
         this.refresh();
     }
 
-    refresh() {
+    async refresh() {
         this._errorItem.visible = false;
         try {
-            this._ring.refresh();
-            this._power.refresh();
+            await this._ring.refresh();
+            await this._power.refresh();
         } catch (e) {
-            this.showError(e);
+            if (!isCancelled(e) && !this.cancellable.is_cancelled())
+                this.showError(e);
         }
     }
 
@@ -250,6 +279,7 @@ class NucLedIndicator extends PanelMenu.Button {
     }
 
     destroy() {
+        this.cancellable.cancel();
         this._ring?.destroy();
         this._power?.destroy();
         super.destroy();

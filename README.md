@@ -43,7 +43,7 @@ Tested on a NUC7i5BNB (BIOS BN0063) with Fedora 44 (kernel 7.2) and GNOME 50.
    sudo ./install-fedora.sh
    ```
 
-3. Install the GNOME Shell extension (GNOME 48–50), then log out and back in:
+3. Install the GNOME Shell extension (GNOME 50), then log out and back in:
 
    ```
    ln -s "$PWD/gnome-extension/nuc-led@ijiki16" ~/.local/share/gnome-shell/extensions/
@@ -58,6 +58,15 @@ Tested on a NUC7i5BNB (BIOS BN0063) with Fedora 44 (kernel 7.2) and GNOME 50.
 
    The extension uses the NUC6CAY / NUC7i[x]BN commands (method IDs 1 and 2).
    It does not support the NUC10, which uses a different API.
+
+   To build a zip for extensions.gnome.org or a GitHub release:
+
+   ```
+   cd gnome-extension
+   gnome-extensions pack --force --extra-source=icons nuc-led@ijiki16
+   ```
+
+   Install a zip with `gnome-extensions install nuc-led@ijiki16.shell-extension.zip`.
 
 Quick command-line test (NUC6CAY / NUC7i[x]BN):
 

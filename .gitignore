@@ -10,3 +10,4 @@ pkg/
 src/
 intel-nuc-led-*.pkg*
 *.mod
+*.shell-extension.zip

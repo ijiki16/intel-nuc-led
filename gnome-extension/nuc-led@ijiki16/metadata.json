@@ -1,7 +1,8 @@
 {
   "uuid": "nuc-led@ijiki16",
   "name": "NUC LED Control",
-  "description": "Control the ring and power button LEDs on Intel NUC7 / NUC6 via the nuc_led kernel module.",
-  "shell-version": ["48", "49", "50"],
+  "description": "Control the ring LED and power button LED on Intel NUC6CAY and NUC7i[x]BN from the top bar: on/off, brightness, color and blink/fade effect.\n\nRequires the nuc_led kernel module and the LEDs set to \"SW control\" in the BIOS. Install instructions: https://github.com/ijiki16/intel-nuc-led",
+  "shell-version": ["50"],
+  "url": "https://github.com/ijiki16/intel-nuc-led",
   "version": 1
 }
